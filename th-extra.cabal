@@ -11,7 +11,7 @@ description:   Extra functionality for the template-haskell library
 build-type:    Simple
 
 Library
-  build-depends: base < 6, template-haskell, containers
+  build-depends: base < 6, template-haskell == 2.7.0.0, containers
 
   build-depends: generic-deriving, th-gd
 

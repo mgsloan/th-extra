@@ -1,8 +1,6 @@
 {-# LANGUAGE FlexibleContexts, TypeOperators, TemplateHaskell, ViewPatterns,
   FlexibleInstances, UndecidableInstances, RankNTypes #-}
 
-{-# OPTIONS_GHC -fcontext-stack=23 #-}
-
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 
 {- |
@@ -29,8 +27,6 @@ import Language.Haskell.TH.Named
 
 import Language.Haskell.TH.Generics
 import Language.Haskell.TH
-
-import Generics.Deriving.TH.Case
 
 import Data.Map (Map)
 import Data.Maybe (fromMaybe, mapMaybe)
@@ -91,13 +87,18 @@ gbinders = binders1 . from
 
 --------------------
 instance Free Type where
-  free ty = $(let q = varE 'free in conCase [| case ty of
-    ForallT tvbs c ty ->
-      filter (`notElem` mapMaybe (either (Just . Left) (fmap Right)) ($(varE 'binders) tvbs)) $
-             $q c ++ $q ty
-    VarT n -> [Left n]
-    ConT n -> [Left n]
-           |] (const [| free1 |]))
+  free (ForallT tvbs c ty)
+    = filter (`notElem` mapMaybe (either (Just . Left) (fmap Right)) (binders tvbs))
+    $ free c ++ free ty
+  free (VarT n)          = [Left n]
+  free (ConT n)          = [Left n]
+  free (AppT l r)        = free l ++ free r
+  free (SigT t _)        = free t
+  free (TupleT _)        = []
+  free (UnboxedTupleT _) = []
+  free (ArrowT)          = []
+  free (ListT)           = []
+
 
 close_ :: Binders a => a -> [Either Name Name] -> [Either Name Name]
 close_ a b = filter (either (p . Left) (p . Right . Just)) b where
@@ -156,31 +157,47 @@ instance Free Dec where
     NewtypeInstD c n tys con ns -> free (DataInstD c n tys [con] ns)
     TySynInstD _ tys ty -> close (BTV tys) ty
 
-
 instance Free Pat where
-  free x = $(let qc = varE 'close; qcs = varE 'closes; q = varE 'free in
-             conCase [| case x of
-    LitP _ -> []
-    VarP _ -> []
-    TupP ps -> $qcs ps
-    ConP n ps -> Right n : $qcs ps
-    InfixP p1 n p2 -> Right n : $qc p1 p2
-    AsP n p -> $q p
-    RecP n fes -> Right n : map (Right . fst) fes ++ $qcs (map snd fes)
-    ListP ps -> $qcs ps
-             |] (const [| free1 |]))
-  
+  free (LitP _) = []
+  free (VarP _) = []
+  free WildP    = []
+  free (TupP        ps) = closes ps 
+  free (UnboxedTupP ps) = closes ps
+  free (ListP       ps) = closes ps
+  free (ConP       n ps) = Right n : closes ps
+  free (InfixP  p1 n p2) = Right n : close p1 p2
+  free (UInfixP p1 n p2) = Right n : close p1 p2
+  free (RecP n fes) = Right n : map (Right . fst) fes ++ closes (map snd fes)
+
+  free (ParensP p) = free p
+  free (TildeP p)  = free p
+  free (BangP p)   = free p
+  free (AsP n p)   = free p
+  free (SigP p t)  = free p
+  free (ViewP _ p) = free p
 
 instance Free Exp where
-  free x = $(let qc = varE 'close; q = varE 'free in conCase [| case x of
-    VarE n -> [Right n]
-    ConE n -> [Right n]
-    LitE _ -> []
-    LamE ps e -> $qc (Cascade ps) e
-    LetE ds e -> $qc ds e
-    RecConE n fes -> Right n : map (Right . fst) fes ++ $q (map snd fes)
-    RecUpdE e fes -> $q e ++ map (Right . fst) fes ++ $q (map snd fes)
-                  |] (const [| free1 |]))
+  free (VarE n) = [Right n]
+  free (ConE n) = [Right n]
+  free (LitE _) = []
+  free (InfixE l o r) = maybe [] free l ++ free o ++ maybe [] free r
+  free (UInfixE l o r) =         free l ++ free o ++          free r
+  free (LamE ps e) = close (Cascade ps) e
+  free (LetE ds e) = close ds e
+  free (RecConE n fes) = Right n : map (Right . fst) fes ++ free (map snd fes)
+  free (RecUpdE e fes) = free e ++ map (Right . fst) fes ++ free (map snd fes)
+
+  free (AppE l r)       = free l ++ free r
+  free (ParensE p)      = free p
+  free (TupE es)        = free es
+  free (UnboxedTupE es) = free es
+  free (CondE c t e)    = free c ++ free t ++ free e
+  free (CaseE e ms)     = free e ++ free ms
+  free (DoE xs)         = free xs
+  free (CompE xs)       = free xs
+  free (ArithSeqE r)    = free r
+  free (ListE xs)       = free xs
+  free (SigE e t)       = free e
 
 instance Free Stmt where
   free (BindS p e) = close p e
@@ -196,10 +213,11 @@ instance Free Body where
 instance Free Match where
   free (Match p b ds) = close' p $ close ds b
 
+{-
 instance Free ClassInstance where
   free (ClassInstance dfun tvbs cxt cls tys) =
     ([Right dfun, Left cls] ++) $ close' tvbs $ close (BTV cxt) tys
-
+-}
 
 --------------------
 b2i :: (Binders a, Subst a) => a -> a -> (Iso -> Bool) -> Iso -> Bool
@@ -271,21 +289,22 @@ instance (Binders1 l, Binders1 r) => Binders1 (l :+: r) where
 instance (Binders1 l, Binders1 r) => Binders1 (l :*: r) where
   binders1 (l :*: r) = binders1 l ++ binders1 r
 
-
-
-
 instance Binders Pat where
-  binders x = $(let q = varE 'binders in conCase [| case x of
-    LitP _ -> []
-    VarP n -> [Right (Just n)]
-    ConP _ pats -> $q pats
-    InfixP p1 _ p2 -> $q p1 ++ $q p2
-    AsP n pat -> Right (Just n) : $q pat
-    WildP -> [Right Nothing]
-    RecP _ fps -> $q (map snd fps)
-    SigP pat ty -> $q pat ++ $q (BTV ty)
-    ViewP _ pat -> $q pat
-                |] (const [| binders1 |]))
+  binders (LitP _)          = []
+  binders (VarP n)          = [Right (Just n)]
+  binders (TupP ps)         = binders ps
+  binders (UnboxedTupP ps)  = binders ps
+  binders (ConP _ pats)     = binders pats
+  binders (InfixP p1 _ p2)  = binders p1 ++ binders p2
+  binders (UInfixP p1 _ p2) = binders p1 ++ binders p2
+  binders (ParensP p)       = binders p
+  binders (TildeP p)        = binders p
+  binders (BangP p)         = binders p
+  binders (AsP n pat)       = Right (Just n) : binders pat
+  binders (WildP)           = [Right Nothing]
+  binders (RecP _ fps)      = binders (map snd fps)
+  binders (SigP pat ty)     = binders pat ++ binders (BTV ty)
+  binders (ViewP _ pat)     = binders pat
 
 instance Binders Dec where
   binders (FunD n _) = [Right (Just n)]
@@ -575,6 +594,7 @@ instance Subst Clause where
   alpha (Clause lps lb lds) (Clause rps rb rds) =
     b2i lps rps $ b2i lds rds $ alpha lb rb
 
+{-
 instance Subst ClassInstance where
   subst sub (ClassInstance dfun tvs cxt cls tys) =
     ClassInstance (r dfun) (r tvs) (r cxt) (r cls) (r tys)
@@ -582,3 +602,4 @@ instance Subst ClassInstance where
   alpha (ClassInstance ldfun ltvs lcxt lcls ltys) (ClassInstance rdfun rtvs rcxt rcls rtys) =
     b2i ltvs rtvs $ alpha ldfun rdfun `andI` alpha lcxt rcxt `andI`
         alpha lcls rcls `andI` alpha ltys rtys
+-}
